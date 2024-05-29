@@ -9,7 +9,7 @@ help: ## List targets in this Makefile
 		| sort --dictionary-order \
 		| column --separator $$'\t' --table --table-wrap 2 --output-separator '    '
 
-SOURCE_FILES = go.mod go.sum $(wildcard *.go)
+SOURCE_FILES = go.mod go.sum $(wildcard *.go) $(wildcard gsync/*.go)
 MAELSTROM_TEST = maelstrom test --bin sargasso
 
 sargasso: $(SOURCE_FILES) ## Build the node binary
@@ -28,5 +28,5 @@ unique-ids: sargasso ## Challenge #2
 	$(MAELSTROM_TEST) -w unique-ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
 
 .PHONY: broadcast
-broadcast: sargasso ## Challenge #3b
-	$(MAELSTROM_TEST) -w broadcast --node-count 5 --time-limit 20 --rate 10
+broadcast: sargasso ## Challenge #3c
+	$(MAELSTROM_TEST) -w broadcast --node-count 5 --time-limit 20 --rate 10 --nemesis partition

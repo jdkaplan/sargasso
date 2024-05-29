@@ -4,25 +4,31 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync/atomic"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
+
+	gsync "github.com/jdkaplan/sargasso/gsync"
 )
 
 type Node struct {
 	node *maelstrom.Node
 
-	nextID int
-	seen   map[int]bool
+	nextID atomic.Uint64
+	seen   *gsync.Set[int]
 
-	neighbors map[string]bool
+	neighbors []string
+	pending   *gsync.Map[string, *gsync.Set[int]]
 }
 
 func NewNode() *Node {
 	n := &Node{
 		node:      maelstrom.NewNode(),
-		nextID:    0,
-		seen:      make(map[int]bool),
-		neighbors: make(map[string]bool),
+		nextID:    atomic.Uint64{},
+		seen:      gsync.NewSet[int](),
+		neighbors: nil,
+		pending:   gsync.NewMap[string, *gsync.Set[int]](),
 	}
 
 	n.handle("echo", n.Echo)
@@ -32,10 +38,10 @@ func NewNode() *Node {
 	n.handle("broadcast", n.Broadcast)
 	n.handle("read", n.Read)
 
-	n.handle("topology", n.Topology)
-
 	n.handle("gossip", n.Gossip)
 	n.handle("gossip_ok", n.GossipOK)
+
+	n.handle("topology", n.Topology)
 
 	return n
 }
@@ -52,13 +58,18 @@ func (n *Node) reply(m maelstrom.Message, body any) error {
 	return n.node.Reply(m, body)
 }
 
+//nolint:unused
 func (n *Node) send(dest string, body any) error {
 	return n.node.Send(dest, body)
 }
 
+func (n *Node) rpc(dest string, body any, h maelstrom.HandlerFunc) error {
+	return n.node.RPC(dest, body, h)
+}
+
 func (n *Node) genID() string {
-	n.nextID++
-	return fmt.Sprintf("%s-%d", n.node.ID(), n.nextID)
+	count := n.nextID.Add(1)
+	return fmt.Sprintf("%s-%d", n.node.ID(), count)
 }
 
 func (n *Node) Echo(m maelstrom.Message) error {
@@ -86,21 +97,20 @@ func (n *Node) Broadcast(m maelstrom.Message) error {
 	if err := json.Unmarshal(m.Body, &body); err != nil {
 		return fmt.Errorf("unpack message: %w", err)
 	}
+	msg := body.Message
 
-	if err := n.gossip(body.Message); err != nil {
-		return fmt.Errorf("gossip: %w", err)
-	}
+	n.gossip(msg)
 
-	n.seen[body.Message] = true
+	n.seen.Add(msg)
 
 	return n.reply(m, map[string]any{
 		"type": "broadcast_ok",
 	})
 }
 
-func (n *Node) gossip(msg int) error {
-	if n.seen[msg] {
-		return nil
+func (n *Node) gossip(msg int) {
+	if n.seen.Has(msg) {
+		return
 	}
 
 	body := map[string]any{
@@ -108,13 +118,23 @@ func (n *Node) gossip(msg int) error {
 		"message": msg,
 	}
 
-	for name := range n.neighbors {
-		if err := n.send(name, body); err != nil {
-			return fmt.Errorf("gossip: %w", err)
-		}
-	}
+	for _, name := range n.neighbors {
+		pending, _ := n.pending.LoadOrStore(name, gsync.NewSet[int]())
+		pending.Add(msg)
 
-	return nil
+		go func() {
+			tick := time.NewTicker(5 * time.Millisecond)
+			defer tick.Stop()
+
+			for pending.Has(msg) {
+				<-tick.C
+
+				if err := n.rpc(name, body, n.GossipOK); err != nil {
+					panic(err)
+				}
+			}
+		}()
+	}
 }
 
 func (n *Node) Gossip(m maelstrom.Message) error {
@@ -126,26 +146,36 @@ func (n *Node) Gossip(m maelstrom.Message) error {
 	}
 	msg := body.Message
 
-	if err := n.gossip(msg); err != nil {
-		return fmt.Errorf("gossip: %w", err)
-	}
+	n.gossip(msg)
 
-	n.seen[msg] = true
+	n.seen.Add(msg)
 
 	return n.reply(m, map[string]any{
-		"type":    "gossip_ok",
+		"type":    "gossip",
 		"message": msg,
 	})
 }
 
 func (n *Node) GossipOK(m maelstrom.Message) error {
+	var body struct {
+		Message int `json:"message"`
+	}
+	if err := json.Unmarshal(m.Body, &body); err != nil {
+		return fmt.Errorf("unpack message: %w", err)
+	}
+	msg := body.Message
+
+	if pending, ok := n.pending.Load(m.Src); ok {
+		pending.Del(msg)
+	}
+
 	return nil
 }
 
 func (n *Node) Read(m maelstrom.Message) error {
 	return n.reply(m, map[string]any{
 		"type":     "read_ok",
-		"messages": keys(n.seen),
+		"messages": n.seen.Values(),
 	})
 }
 
@@ -157,21 +187,11 @@ func (n *Node) Topology(m maelstrom.Message) error {
 		return fmt.Errorf("unpack message: %w", err)
 	}
 
-	for _, name := range body.Topology[n.node.ID()] {
-		n.neighbors[name] = true
-	}
+	n.neighbors = body.Topology[n.node.ID()]
 
 	return n.reply(m, map[string]any{
 		"type": "topology_ok",
 	})
-}
-
-func keys[K comparable, V any](m map[K]V) []K {
-	ks := make([]K, 0, len(m))
-	for k := range m {
-		ks = append(ks, k)
-	}
-	return ks
 }
 
 func main() {
