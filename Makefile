@@ -26,3 +26,7 @@ echo: sargasso ## Challenge #1
 .PHONY: unique-ids
 unique-ids: sargasso ## Challenge #2
 	$(MAELSTROM_TEST) -w unique-ids --time-limit 30 --rate 1000 --node-count 3 --availability total --nemesis partition
+
+.PHONY: broadcast
+broadcast: sargasso ## Challenge #3a
+	$(MAELSTROM_TEST) -w broadcast --node-count 1 --time-limit 20 --rate 10
