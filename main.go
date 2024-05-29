@@ -34,6 +34,9 @@ func NewNode() *Node {
 
 	n.handle("topology", n.Topology)
 
+	n.handle("gossip", n.Gossip)
+	n.handle("gossip_ok", n.GossipOK)
+
 	return n
 }
 
@@ -47,6 +50,10 @@ func (n *Node) run() error {
 
 func (n *Node) reply(m maelstrom.Message, body any) error {
 	return n.node.Reply(m, body)
+}
+
+func (n *Node) send(dest string, body any) error {
+	return n.node.Send(dest, body)
 }
 
 func (n *Node) genID() string {
@@ -80,11 +87,59 @@ func (n *Node) Broadcast(m maelstrom.Message) error {
 		return fmt.Errorf("unpack message: %w", err)
 	}
 
+	if err := n.gossip(body.Message); err != nil {
+		return fmt.Errorf("gossip: %w", err)
+	}
+
 	n.seen[body.Message] = true
 
 	return n.reply(m, map[string]any{
 		"type": "broadcast_ok",
 	})
+}
+
+func (n *Node) gossip(msg int) error {
+	if n.seen[msg] {
+		return nil
+	}
+
+	body := map[string]any{
+		"type":    "gossip",
+		"message": msg,
+	}
+
+	for name := range n.neighbors {
+		if err := n.send(name, body); err != nil {
+			return fmt.Errorf("gossip: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (n *Node) Gossip(m maelstrom.Message) error {
+	var body struct {
+		Message int `json:"message"`
+	}
+	if err := json.Unmarshal(m.Body, &body); err != nil {
+		return fmt.Errorf("unpack message: %w", err)
+	}
+	msg := body.Message
+
+	if err := n.gossip(msg); err != nil {
+		return fmt.Errorf("gossip: %w", err)
+	}
+
+	n.seen[msg] = true
+
+	return n.reply(m, map[string]any{
+		"type":    "gossip_ok",
+		"message": msg,
+	})
+}
+
+func (n *Node) GossipOK(m maelstrom.Message) error {
+	return nil
 }
 
 func (n *Node) Read(m maelstrom.Message) error {
